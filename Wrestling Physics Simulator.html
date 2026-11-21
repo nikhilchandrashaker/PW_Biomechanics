@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wrestling Physics Simulator</title>
+<style>
+:root{--bg:#fafafa;--fg:#1c1c1e;--mut:#6b7280;--card:#fff;--bd:#e5e7eb;--acc:#2980b9;--hot:#c0392b;--body:#34495e;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121214;--fg:#ececf0;--mut:#9ca3af;--card:#1c1c20;--bd:#2e2e35;--body:#aab7c4;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#121214;--fg:#ececf0;--mut:#9ca3af;--card:#1c1c20;--bd:#2e2e35;--body:#aab7c4;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:900px;margin:0 auto;padding:18px 16px 40px}
+h1{font-size:1.4rem;margin:.2em 0}.sub,.note{color:var(--mut);font-size:.85rem}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+button{border:1px solid var(--bd);background:var(--card);color:var(--fg);border-radius:999px;padding:6px 14px;cursor:pointer;font:inherit}
+button.on,button.go{background:var(--fg);color:var(--bg)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin:12px 0}
+canvas{width:100%;display:block}
+.ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 18px}
+.ctl label{display:flex;justify-content:space-between;font-size:.85rem}
+.ctl input[type=range]{width:100%}.ctl select{width:100%;font:inherit;padding:4px}
+.out{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.k{color:var(--mut);font-size:.78rem}.v{font-size:1.2rem;font-weight:600;font-variant-numeric:tabular-nums}
+</style></head><body><main>
+<h1>Wrestling Physics Simulator</h1>
+<p class="sub">First-order model: change the inputs, watch the motion, read the loads. Estimates only, not measurements.</p>
+<div class="bar" id="modes"></div>
+<div class="bar" id="presets"></div>
+<div class="card"><canvas id="cv" width="900" height="300"></canvas>
+<div class="bar"><button class="go" id="play">Play</button><span class="note" id="status"></span></div></div>
+<div class="card"><div class="ctl" id="ctl"></div></div>
+<div class="card"><div class="out" id="out"></div></div>
+<div class="card"><canvas id="fc" width="900" height="170"></canvas><div class="note" id="fnote"></div></div>
+</main>
+<script>
+const g=9.81,HS=Math.PI/2;
+const SURF={ring:[.060,0],floor:[.040,0],table:[.090,.30]};
+const M={
+drop:{l:"Fall / slam landing",c:[["m","Receiver mass (kg)",70,150,1,100],["h","CoM drop height (m)",.3,3.5,.05,1.5],["surf","Surface",["ring","floor","table"],"ring"],["tech","Technique (contact-time x)",1,2,.05,1.4],["slap","Slap / arm diversion",0,.4,.01,.15]],
+ P:[["Back bump",{m:100,h:.85,surf:"ring",tech:1.4,slap:.2}],["Powerbomb",{m:100,h:1.95,surf:"ring",tech:1.4,slap:.15}],["Ladder fall",{m:100,h:3,surf:"ring",tech:1.5,slap:.2}],["Through a table",{m:100,h:1.1,surf:"table",tech:1.2,slap:.1}],["No technique",{m:100,h:1.5,surf:"ring",tech:1,slap:0}]]},
+air:{l:"Aerial move",c:[["m","Attacker mass (kg)",70,150,1,100],["h0","Launch CoM height (m)",1.5,3.2,.05,2.7],["vy","Vertical launch speed (m/s)",0,5,.1,3.2],["vx","Horizontal speed (m/s)",0,5,.1,.8],["n","Rotations",0,2,.25,1],["hc","Contact CoM height (m)",.5,1.5,.05,.7],["dtc","Contact time (s)",.04,.12,.005,.07]],
+ P:[["Frog splash",{m:100,h0:2.7,vy:2,vx:.8,n:0,hc:.7,dtc:.07}],["Moonsault",{m:100,h0:2.7,vy:3.2,vx:.8,n:1,hc:.7,dtc:.07}],["450 splash",{m:100,h0:2.7,vy:3.8,vx:.8,n:1.25,hc:.7,dtc:.07}],["Tope suicida",{m:95,h0:1.7,vy:1.5,vx:4,n:0,hc:1,dtc:.09}]]},
+strike:{l:"Strike",c:[["v","Segment speed (m/s)",3,14,.1,11],["me","Effective mass (kg)",1,10,.1,3],["dt","Contact time (s)",.005,.04,.001,.015],["e","Restitution",0,.5,.05,.2],["w","Worked fraction",.05,1,.05,.2]],
+ P:[["Superkick",{v:11,me:3,dt:.015,e:.2,w:.2}],["Lariat",{v:8,me:6,dt:.02,e:.1,w:.3}],["Full contact",{v:11,me:3,dt:.015,e:.2,w:1}]]}};
+let mode="drop",V={},t=0,playing=false,last=0,R={};
+const $=i=>document.getElementById(i),cv=$("cv"),cx=cv.getContext("2d"),fc=$("fc"),fx=fc.getContext("2d");
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function calc(){const v=V;
+ if(mode==="drop"){const[dts,ab]=SURF[v.surf],sp=Math.sqrt(2*g*v.h),ke=v.m*g*v.h,ve=sp*Math.sqrt((1-ab)*(1-v.slap)),dt=dts*v.tech,F=HS*v.m*ve/dt;
+  R={tf:sp/g,dt,F,items:[["Impact speed",sp.toFixed(1)+" m/s"],["Energy",Math.round(ke)+" J"],["Contact time",(dt*1000).toFixed(0)+" ms"],["Peak force",(F/1000).toFixed(1)+" kN"],["Peak g",(F/v.m/g).toFixed(1)+" g"]]};}
+ else if(mode==="air"){const tf=(v.vy+Math.sqrt(v.vy*v.vy+2*g*(v.h0-v.hc)))/g,vy=v.vy-g*tf,sp=Math.hypot(v.vx,vy),F=HS*v.m*sp/v.dtc,w=2*Math.PI*v.n/tf;
+  R={tf,dt:v.dtc,F,w,items:[["Flight time",tf.toFixed(2)+" s"],["Impact speed",sp.toFixed(1)+" m/s"],["Rotation rate",w.toFixed(1)+" rad/s"],["Landing error @50 ms",(w*.05*57.3).toFixed(0)+"\u00b0"],["Peak force",(F/1000).toFixed(1)+" kN"],["Peak g (lighter athlete)",(F/Math.min(v.m,100)/g).toFixed(1)+" g"]]};}
+ else{const J=v.me*v.v*(1+v.e),Ff=HS*J/v.dt,F=Ff*v.w;
+  R={tf:.4,dt:v.dt,F,items:[["Full-contact force",(Ff/1000).toFixed(1)+" kN"],["Delivered force",(F/1000).toFixed(2)+" kN"],["Head accel (full)",(Ff/6/g).toFixed(0)+" g"],["Head accel (delivered)",(F/6/g).toFixed(0)+" g"],["Contact time",(v.dt*1000).toFixed(0)+" ms"]]};}
+ $("out").innerHTML=R.items.map(i=>`<div><div class="k">${i[0]}</div><div class="v">${i[1]}</div></div>`).join("");
+ $("fnote").textContent=mode==="strike"?"Force pulse (half-sine). Dashed line: full contact; solid: delivered.":"Contact force pulse (half-sine) with model peak force. Pulse width is not to scale with the animation.";
+ force();}
+function force(){const W=fc.width,H=fc.height;fx.clearRect(0,0,W,H);const fg=css("--fg"),mut=css("--mut");
+ const full=mode==="strike"?R.F/V.w:R.F,mx=full*1.1;fx.strokeStyle=mut;fx.lineWidth=1;fx.beginPath();fx.moveTo(40,10);fx.lineTo(40,H-25);fx.lineTo(W-10,H-25);fx.stroke();
+ fx.fillStyle=mut;fx.font="12px system-ui";fx.fillText((mx/1000).toFixed(0)+" kN",2,16);fx.fillText("0",28,H-28);fx.fillText("time \u2192",W-60,H-8);
+ const curve=(P,dash,col)=>{fx.setLineDash(dash);fx.strokeStyle=col;fx.lineWidth=2;fx.beginPath();for(let i=0;i<=100;i++){const x=40+(W-60)*(.1+.8*i/100)*1,y=H-25-(H-45)*P*Math.sin(Math.PI*i/100)/mx;i?fx.lineTo(x,y):fx.moveTo(x,y)}fx.stroke();fx.setLineDash([])};
+ if(mode==="strike")curve(full,[6,4],mut);curve(R.F,[],css("--hot"));
+ fx.fillStyle=css("--hot");fx.fillText("peak "+(R.F/1000).toFixed(1)+" kN",W/2-30,H-25-(H-45)*R.F/mx-6);}
+function body(x,y,ang,col){cx.save();cx.translate(x,y);cx.rotate(ang);cx.strokeStyle=col;cx.lineCap="round";cx.lineWidth=14;cx.beginPath();cx.moveTo(-22,0);cx.lineTo(22,0);cx.stroke();cx.fillStyle=col;cx.beginPath();cx.arc(30,0,9,0,7);cx.fill();cx.restore();}
+function draw(){const W=cv.width,H=cv.height,gy=H-30,S=(H-60)/3.6,fg=css("--fg"),mut=css("--mut"),bd=css("--body"),hot=css("--hot");cx.clearRect(0,0,W,H);
+ cx.fillStyle=mut;cx.globalAlpha=.35;cx.fillRect(0,gy,W,6);cx.globalAlpha=1;
+ const Y=h=>gy-h*S;
+ if(mode==="drop"){const T=R.tf,imp=Math.min(t,T),h=Math.max(V.h-.5*g*imp*imp,0),x=W/2;
+  body(x,Y(h+.15),t>T?0:-1.3+1.3*Math.min(t/T,1),t>T?hot:bd);cx.fillStyle=mut;cx.fillText("drop "+V.h.toFixed(2)+" m",20,20);
+  cx.setLineDash([4,4]);cx.strokeStyle=mut;cx.beginPath();cx.moveTo(x+60,Y(V.h));cx.lineTo(x+60,gy);cx.stroke();cx.setLineDash([]);}
+ else if(mode==="air"){const T=R.tf,tt=Math.min(t,T),x0=90,vxs=Math.max(V.vx,.8)*70;
+  cx.strokeStyle=mut;cx.setLineDash([3,5]);cx.beginPath();for(let i=0;i<=40;i++){const s=T*i/40,x=x0+vxs*s,y=Y(V.h0+V.vy*s-.5*g*s*s);i?cx.lineTo(x,y):cx.moveTo(x,y)}cx.stroke();cx.setLineDash([]);
+  const x=x0+vxs*tt,h=V.h0+V.vy*tt-.5*g*tt*tt;body(x,Y(h),2*Math.PI*V.n*tt/T*-1,t>T?hot:bd);
+  cx.fillStyle=mut;cx.fillRect(x0+vxs*T-40,gy-10,80,10);cx.fillText("opponent",x0+vxs*T-25,gy-14);cx.fillText("launch "+V.h0.toFixed(1)+" m, "+V.n+" rot",20,20);}
+ else{const f=Math.min(t/.5,1),base=W/2-100;cx.fillStyle=mut;cx.beginPath();cx.arc(base+200,Y(1.6),22,0,7);cx.fill();cx.fillRect(base+190,Y(1.45),20,90);
+  const x=base-20+f*205;body(x,Y(1.2+.3*Math.sin(f*Math.PI)),-.4,t>.5?hot:bd);cx.fillStyle=mut;cx.fillText("foot speed "+V.v+" m/s",20,20);}
+}
+function loop(ts){if(playing){const dt=(ts-last)/1000;last=ts;t+=dt*(mode==="strike"?1:1);const end=(mode==="strike"?.5:R.tf)+.9;if(t>end){playing=false;$("play").textContent="Replay";$("status").textContent=""}}draw();requestAnimationFrame(loop)}
+$("play").onclick=()=>{t=0;playing=true;last=performance.now();$("play").textContent="Replay";$("status").textContent=""};
+function build(){$("modes").innerHTML="";Object.entries(M).forEach(([k,m])=>{const b=document.createElement("button");b.textContent=m.l;b.className=k===mode?"on":"";b.onclick=()=>{mode=k;build();load(M[k].P[0][1])};$("modes").appendChild(b)});
+ $("presets").innerHTML="";M[mode].P.forEach(([n,p])=>{const b=document.createElement("button");b.textContent=n;b.onclick=()=>{load(p)};$("presets").appendChild(b)});
+ $("ctl").innerHTML=M[mode].c.map(c=>c[0]==="surf"?`<div><label>${c[1]}</label><select id="i_surf">${c[2].map(o=>`<option>${o}</option>`).join("")}</select></div>`:`<div><label>${c[1]}<b id="o_${c[0]}"></b></label><input type="range" id="i_${c[0]}" min="${c[2]}" max="${c[3]}" step="${c[4]}"></div>`).join("");
+ M[mode].c.forEach(c=>{const el=$("i_"+c[0]);el.oninput=()=>{V[c[0]]=c[0]==="surf"?el.value:+el.value;sync();calc();t=0;playing=false};});}
+function sync(){M[mode].c.forEach(c=>{const el=$("i_"+c[0]);if(c[0]==="surf"){el.value=V.surf}else{el.value=V[c[0]];$("o_"+c[0]).textContent=" "+V[c[0]]}})}
+function load(p){V={...p};sync();calc();t=0;playing=false;$("play").textContent="Play"}
+build();load(M.drop.P[0][1]);requestAnimationFrame(loop);
+</script></body></html>
